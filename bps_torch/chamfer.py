@@ -1,34 +1,14 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All rights reserved.
 
-from typing import Union
+from typing import Literal
 
 import torch
-import torch.nn.functional as F
-from pytorch3d.ops.knn import knn_gather, knn_points
-from pytorch3d.structures.pointclouds import Pointclouds
-
-
-def _validate_chamfer_reduction_inputs(
-    batch_reduction: Union[str, None], point_reduction: str
-):
-    """Check the requested reductions are valid.
-
-    Args:
-        batch_reduction: Reduction operation to apply for the loss across the
-            batch, can be one of ["mean", "sum"] or None.
-        point_reduction: Reduction operation to apply for the loss across the
-            points, can be one of ["mean", "sum"].
-    """
-    if batch_reduction is not None and batch_reduction not in ["mean", "sum"]:
-        raise ValueError('batch_reduction must be one of ["mean", "sum"] or None')
-    if point_reduction not in ["mean", "sum"]:
-        raise ValueError('point_reduction must be one of ["mean", "sum"]')
+from pytorch3d.ops.knn import knn_points
 
 
 def _handle_pointcloud_input(
-    points: Union[torch.Tensor, Pointclouds],
-    lengths: Union[torch.Tensor, None],
-    normals: Union[torch.Tensor, None],
+    points: torch.Tensor,
+    lengths: torch.Tensor | None,
 ):
     """
     If points is an instance of Pointclouds, retrieve the padded points tensor
@@ -36,31 +16,28 @@ def _handle_pointcloud_input(
     Otherwise, return the input points (and normals) with the number of points per cloud
     set to the size of the second dimension of `points`.
     """
-    if isinstance(points, Pointclouds):
-        X = points.points_padded()
-        lengths = points.num_points_per_cloud()
-        normals = points.normals_padded()  # either a tensor or None
-    elif torch.is_tensor(points):
+    if torch.is_tensor(points):
         if points.ndim != 3:
-            raise ValueError("Expected points to be of shape (N, P, D)")
+            raise ValueError(
+                f"Expected points to be of shape (N, P, D), got {points.shape}"
+            )
         X = points
         if lengths is not None and (
             lengths.ndim != 1 or lengths.shape[0] != X.shape[0]
         ):
-            raise ValueError("Expected lengths to be of shape (N,)")
+            raise ValueError(
+                f"Expected lengths to be of shape (N,), got {lengths.shape}"
+            )
         if lengths is None:
             lengths = torch.full(
                 (X.shape[0],), X.shape[1], dtype=torch.int64, device=points.device
             )
-        if normals is not None and normals.ndim != 3:
-            raise ValueError("Expected normals to be of shape (N, P, 3")
     else:
         raise ValueError(
-            "The input pointclouds should be either "
-            + "Pointclouds objects or torch.Tensor of shape "
+            "The input pointclouds should be torch.Tensor of shape "
             + "(minibatch, num_points, 3)."
         )
-    return X, lengths, normals
+    return X, lengths
 
 
 def chamfer_distance(
@@ -68,50 +45,41 @@ def chamfer_distance(
     y,
     x_lengths=None,
     y_lengths=None,
-    x_normals=None,
-    y_normals=None,
     weights=None,
-    batch_reduction: Union[str, None] = "mean",
-    point_reduction: str = "mean",
+    batch_reduction: Literal["mean", "sum"] | None = "mean",
 ):
     """
     Chamfer distance between two pointclouds x and y.
 
-    Args:
-        x: FloatTensor of shape (N, P1, D) or a Pointclouds object representing
-            a batch of point clouds with at most P1 points in each batch element,
-            batch size N and feature dimension D.
-        y: FloatTensor of shape (N, P2, D) or a Pointclouds object representing
-            a batch of point clouds with at most P2 points in each batch element,
-            batch size N and feature dimension D.
-        x_lengths: Optional LongTensor of shape (N,) giving the number of points in each
-            cloud in x.
-        y_lengths: Optional LongTensor of shape (N,) giving the number of points in each
-            cloud in x.
-        x_normals: Optional FloatTensor of shape (N, P1, D).
-        y_normals: Optional FloatTensor of shape (N, P2, D).
-        weights: Optional FloatTensor of shape (N,) giving weights for
-            batch elements for reduction operation.
-        batch_reduction: Reduction operation to apply for the loss across the
-            batch, can be one of ["mean", "sum"] or None.
-        point_reduction: Reduction operation to apply for the loss across the
-            points, can be one of ["mean", "sum"].
+    Parameters
+    ----------
+    x: FloatTensor of shape (N, P1, D)
+        a batch of point clouds with at most P1 points in each batch element,
+        batch size N and feature dimension D.
+    y: FloatTensor of shape (N, P2, D)
+        a batch of point clouds with at most P2 points in each batch element,
+        batch size N and feature dimension D.
+    x_lengths: Optional LongTensor of shape (N,) giving the number of points in each
+        cloud in x.
+    y_lengths: Optional LongTensor of shape (N,) giving the number of points in each
+        cloud in x.
+    weights: Optional FloatTensor of shape (N,) giving weights for
+        batch elements for reduction operation.
+    batch_reduction: Reduction operation to apply for the loss across the
+        batch, can be one of ["mean", "sum"] or None.
 
-    Returns:
-        2-element tuple containing
-
-        - **loss**: Tensor giving the reduced distance between the pointclouds
-          in x and the pointclouds in y.
-        - **loss_normals**: Tensor giving the reduced cosine distance of normals
-          between pointclouds in x and pointclouds in y. Returns None if
-          x_normals and y_normals are None.
+    Returns
+    -------
+    cham_x: Tensor giving the reduced distance between the pointclouds
+        in x and the pointclouds in y.
+    cham_y: Tensor giving the reduced distance between the pointclouds
+        in y and the pointclouds in x.
+    x_nn: Tensor giving the indices of the nearest points in y for each point in x.
+    y_nn: Tensor giving the indices of the nearest points in x for each point in y.
     """
-    _validate_chamfer_reduction_inputs(batch_reduction, point_reduction)
 
-    x, x_lengths, x_normals = _handle_pointcloud_input(x, x_lengths, x_normals)
-    y, y_lengths, y_normals = _handle_pointcloud_input(y, y_lengths, y_normals)
-
-    return_normals = x_normals is not None and y_normals is not None
+    x, x_lengths = _handle_pointcloud_input(x, x_lengths)
+    y, y_lengths = _handle_pointcloud_input(y, y_lengths)
 
     N, P1, D = x.shape
     P2 = y.shape[1]
@@ -127,10 +95,14 @@ def chamfer_distance(
     )  # shape [N, P2]
 
     if y.shape[0] != N or y.shape[2] != D:
-        raise ValueError("y does not have the correct shape.")
+        raise ValueError(
+            f"y does not have the correct shape. {y.shape[0]=} != {N=}, {y.shape[2]=} != {D=}"
+        )
     if weights is not None:
         if weights.size(0) != N:
-            raise ValueError("weights must be of shape (N,).")
+            raise ValueError(
+                f"weights must be of shape (N,). {weights.shape[0]=} != {N=}"
+            )
         if not (weights >= 0).all():
             raise ValueError("weights cannot be negative.")
         if weights.sum() == 0.0:
@@ -141,7 +113,6 @@ def chamfer_distance(
                     (x.sum((1, 2)) * weights).sum() * 0.0,
                 )
             return ((x.sum((1, 2)) * weights) * 0.0, (x.sum((1, 2)) * weights) * 0.0)
-
 
     x_nn = knn_points(x, y, lengths1=x_lengths, lengths2=y_lengths, K=1)
     y_nn = knn_points(y, x, lengths1=y_lengths, lengths2=x_lengths, K=1)
@@ -158,16 +129,17 @@ def chamfer_distance(
         cham_x *= weights.view(N, 1)
         cham_y *= weights.view(N, 1)
 
-    return cham_x, cham_y, x_nn.idx[...,-1], y_nn.idx[...,-1]
+    return cham_x, cham_y, x_nn.idx[..., -1], y_nn.idx[..., -1]
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     import time
 
-    p1 = torch.rand([100, 4000, 3]).cuda()
-    p2 = torch.rand([100, 50000 ,3]).cuda()
-
+    p1 = torch.rand([5000, 1000, 3]).cuda()
+    p2 = torch.rand([5000, 50000, 3]).cuda()
 
     s = time.time()
-    ch = chamfer_distance(p1,p2)
+    ch = chamfer_distance(p1, p2)
     torch.cuda.synchronize()
-    print(f'it took {time.time() - s} secods --> pytorch3d')
+    # 1.27 seconds
+    print(f"it took {time.time() - s} secods --> pytorch3d")
