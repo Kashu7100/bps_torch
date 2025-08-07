@@ -135,11 +135,23 @@ def chamfer_distance(
 if __name__ == "__main__":
     import time
 
-    p1 = torch.rand([5000, 1000, 3]).cuda()
-    p2 = torch.rand([5000, 50000, 3]).cuda()
+    p1 = torch.rand([500, 12, 3]).cuda()
+    p2 = torch.rand([500, 1000, 3]).cuda()
 
     s = time.time()
-    ch = chamfer_distance(p1, p2)
+    ch = chamfer_distance(p1, p2)[0]
     torch.cuda.synchronize()
     # 1.27 seconds
     print(f"it took {time.time() - s} secods --> pytorch3d")
+
+    s = time.time()
+    cd = torch.cdist(p1, p2).min(dim=-1).values
+    torch.cuda.synchronize()
+    print(f"it took {time.time() - s} secods --> torch.cdist")
+
+    print(ch.shape)
+    print(cd.shape)
+    print(ch[0] ** 0.5)
+    print(cd[0])
+
+    assert torch.allclose(ch**0.5, cd, atol=1e-4)
